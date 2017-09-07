@@ -1,12 +1,27 @@
 "# laravel-models" 
 
 ## How to use this
-All you have to do is change the variables to the ones you want to use, host, db name, user, password and folder.
+Create One folder Called Commands inside App/Console
 
-After that just run it with:
+Drop the ModelsImport in that folder
+
+Go to /app/Console/Kernel.php and add this line:
+
 ```
-php models-creator.php
+protected $commands = [
+   Commands\ModelsImport::class,
+];
 ```
-Or in your browser both should work.
+
+Use composer dumpautoload in order to enable this new class
+
+And then run the command:
+```
+php artisan models:import database-name
+```
+
+This will automatically create all your models under:
+app/Models/DatabaseName
+
 
 Have fun :D
