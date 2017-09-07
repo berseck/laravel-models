@@ -17,7 +17,7 @@ Use composer dumpautoload in order to enable this new class
 
 And then run the command:
 ```
-php artisan models:import database-name
+php artisan models:import databasename
 ```
 
 This will automatically create all your models under:
