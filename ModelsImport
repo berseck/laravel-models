@@ -1,0 +1,98 @@
+<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+use DB;
+
+class ModelsImport extends Command
+{
+    /**
+     * The name and signature of the console command.
+     *
+     * @var string
+     */
+    protected $signature = 'models:import {database}';
+
+    /**
+     * The console command description.
+     *
+     * @var string
+     */
+    protected $description = 'Create Models based on DB param';
+
+    /**
+     * Create a new command instance.
+     *
+     * @return void
+     */
+    public function __construct()
+    {
+        parent::__construct();
+    }
+
+    /**
+     * Execute the console command.
+     *
+     * @return mixed
+     */
+    public function handle()
+    {
+        if ($this->argument('database')) {
+            $db = $this->argument('database');
+
+            $folder = base_path()."/app/Models/".ucfirst($db);
+            if (!file_exists($folder)) {
+                mkdir($folder);
+            }
+            $connection = DB::connection($db);
+
+            $tables = $connection->select("SHOW TABLES");
+            $counter = 0;
+
+            foreach ($tables as $table) {
+                $fillables = array();
+                $current_table = current($table);
+                $model = implode('', array_map('ucfirst', explode('_', $current_table)));
+                if (!file_exists($folder."/".$model.".php")) {
+                    $handler = fopen($folder."/".$model.".php", "w") or die("Unable to open file!");
+                    $resp = $connection->select(DB::raw("SELECT column_name from information_schema.columns where table_schema = '".$db."' and table_name = '".$current_table."' order by table_name,ordinal_position"));
+
+                    $primary = $resp[0]->column_name;
+                    foreach ($resp as $field) {
+                        if ($field->column_name != "created_at" && $field->column_name != "updated_at") {
+                            $fillables[] = '"'.$field->column_name.'"';
+                        }
+                    }
+                    $namespace = "App\Models"."\\".ucfirst($db);
+                    $text = '<?php
+namespace '.$namespace.';
+
+use Illuminate\Database\Eloquent\Model;
+
+class '.$model.' extends Model {
+    protected $connection = "'.env('DB_ENGAGE_DATABASE').'";
+
+    protected $table = "'.$current_table.'";
+
+    protected $fillable = array('.implode(',', $fillables).');
+
+    public $timestamps = true;
+
+    protected $hidden = array("created_at", "updated_at");
+}
+';
+                    fwrite($handler, $text);
+                    fclose($handler);
+                    $counter++;
+                    echo "Model: $model was successfully created.\n";
+                }
+            }
+            if ($counter == 0) {
+                echo "Nothing to update.\n";
+            }
+        } else {
+            echo "No database parameter was passed.\n";
+        }
+    }
+}
