@@ -1,10 +1,7 @@
 <?php
-
 namespace App\Console\Commands;
-
 use Illuminate\Console\Command;
 use DB;
-
 class ModelsImport extends Command
 {
     /**
@@ -12,15 +9,13 @@ class ModelsImport extends Command
      *
      * @var string
      */
-    protected $signature = 'models:import {database}';
-
+    protected $signature = 'models:import {database} {namespace?}';
     /**
      * The console command description.
      *
      * @var string
      */
     protected $description = 'Create Models based on DB param';
-
     /**
      * Create a new command instance.
      *
@@ -30,7 +25,6 @@ class ModelsImport extends Command
     {
         parent::__construct();
     }
-
     /**
      * Execute the console command.
      *
@@ -40,48 +34,100 @@ class ModelsImport extends Command
     {
         if ($this->argument('database')) {
             $db = $this->argument('database');
-
-            $folder = base_path()."/app/Models/".ucfirst($db);
+            if ($this->argument('namespace')) {
+                $namespace = $this->argument('namespace');
+            } else {
+                $namespace = "";
+            }
+            $folder = base_path()."/app/Models/".$namespace;
             if (!file_exists($folder)) {
                 mkdir($folder);
             }
             $connection = DB::connection($db);
-
+            $dbName = $connection->getDatabaseName();
             $tables = $connection->select("SHOW TABLES");
             $counter = 0;
-
             foreach ($tables as $table) {
-                $fillables = array();
+                $fillables = "";
+                $hidden  = "";
                 $current_table = current($table);
                 $model = implode('', array_map('ucfirst', explode('_', $current_table)));
                 if (!file_exists($folder."/".$model.".php")) {
+                    $hasSoftDeletes = false;
                     $handler = fopen($folder."/".$model.".php", "w") or die("Unable to open file!");
-                    $resp = $connection->select(DB::raw("SELECT column_name from information_schema.columns where table_schema = '".$db."' and table_name = '".$current_table."' order by table_name,ordinal_position"));
-
-                    $primary = $resp[0]->column_name;
+                    $sql = "SELECT column_name from information_schema.columns where table_schema = '".$dbName."' and table_name = '".$current_table."' order by table_name,ordinal_position";
+                    $resp = $connection->select(DB::raw($sql));
+                    if (!empty($resp) && count($resp) > 0) {
+                        $primary = $resp[0]->column_name;
+                    }
                     foreach ($resp as $field) {
-                        if ($field->column_name != "created_at" && $field->column_name != "updated_at") {
-                            $fillables[] = '"'.$field->column_name.'"';
+                        if ($field->column_name != "id" && $field->column_name != "created_at" && $field->column_name != "updated_at" && $field->column_name != "deleted_at") {
+                            $fillables .= "\n\t\t\"".$field->column_name."\",";
+                        }
+                        if ($field->column_name == "created_at" || $field->column_name == "updated_at" || $field->column_name == "deleted_at") {
+                            $hidden .= "\n\t\t\"".$field->column_name."\",";
+                        }
+                        if ($field->column_name == "deleted_at") {
+                            $hasSoftDeletes = true;
                         }
                     }
-                    $namespace = "App\Models"."\\".ucfirst($db);
+                    $fillables = rtrim($fillables, ",");
+                    $fillables .= "\n\t";
+                    $hidden = rtrim($hidden, ",");
+                    $hidden .= "\n\t";
+                    if (!empty($namespace)) {
+                        $namespaceString = "App\Models"."\\".$namespace;
+                    } else {
+                        $namespaceString = "App\Models";
+                    }
                     $text = '<?php
-namespace '.$namespace.';
-
-use Illuminate\Database\Eloquent\Model;
-
-class '.$model.' extends Model {
-    protected $connection = "'.env('DB_ENGAGE_DATABASE').'";
-
-    protected $table = "'.$current_table.'";
-
-    protected $fillable = array('.implode(',', $fillables).');
-
+namespace '.$namespaceString.';
+use Illuminate\Database\Eloquent\Model;';
+                    if ($hasSoftDeletes) {
+                        $text .= "\nuse Illuminate\Database\Eloquent\SoftDeletes;";
+                    }
+                    $text .= "\n\nclass $model extends Model {";
+                    if ($hasSoftDeletes) {
+                        $text .= "\n\n\tuse SoftDeletes;";
+                    }
+                    $text .= '
+    /**
+     * Table name
+     *
+     * @var string
+     */
+    //protected $table = "'.$current_table.'"; this is not required
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var array
+     */
+    protected $fillable = ['.$fillables.'];
+    /**
+     * Default Timestamps
+     *
+     * @var boolean
+     */
     public $timestamps = true;
-
-    protected $hidden = array("created_at", "updated_at");
-}
+    protected $softDelete = true;
+    /**
+     * Hidden attributes
+     *
+     * @var array
+     */
+    protected $hidden = ['.$hidden.'];
+    /**
+     * Appends attributes
+     *
+     * @var array
+     */
+    protected $appends = [];
 ';
+                    $text .= $this->checkBelongsTo($connection, $current_table, $namespaceString);
+                    $text .= $this->checkHasMany($connection, $current_table, $namespaceString);
+                    $text .= "
+}
+";
                     fwrite($handler, $text);
                     fclose($handler);
                     $counter++;
@@ -92,7 +138,70 @@ class '.$model.' extends Model {
                 echo "Nothing to update.\n";
             }
         } else {
-            echo "No database parameter was passed.\n";
+            echo "No database or namespace parameter was passed.\n";
         }
+    }
+    private function checkBelongsTo($connection, $table, $name)
+    {
+        $text = "";
+        $sql = "SELECT i.TABLE_NAME, i.CONSTRAINT_TYPE, i.CONSTRAINT_NAME, k.REFERENCED_TABLE_NAME as belongsTo, k.REFERENCED_COLUMN_NAME
+            FROM information_schema.TABLE_CONSTRAINTS i
+            LEFT JOIN information_schema.KEY_COLUMN_USAGE k ON i.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+            WHERE i.CONSTRAINT_TYPE = 'FOREIGN KEY'
+            AND i.TABLE_SCHEMA = DATABASE()
+            AND i.TABLE_NAME = '$table'";
+        $resp = $connection->select(DB::raw($sql));
+        foreach ($resp as $belongs) {
+            $functionName = lcfirst(implode('', array_map('ucfirst', explode('_', $belongs->belongsTo))));
+            $model = implode('', array_map('ucfirst', explode('_', $belongs->belongsTo)));
+            $text .= '
+    /**
+     * This table has a foreign key and belongs to '.$model.'
+     *
+     */
+    public function '.$functionName.'()
+    {
+        return $this->belongsTo("'.$name.'\\'.$model.'", "'.$belongs->belongsTo.'_id");
+    }
+            ';
+        }
+        return $text;
+    }
+    private function checkHasMany($connection, $table, $name)
+    {
+        $text = "";
+        $sql = "SELECT
+          ke.REFERENCED_TABLE_SCHEMA parentSchema,
+          ke.referenced_table_name parentTable,
+          ke.REFERENCED_COLUMN_NAME parentColumnName,
+          ke.TABLE_SCHEMA ChildSchema,
+          ke.table_name childTable,
+          ke.COLUMN_NAME ChildColumnName
+        FROM
+          information_schema.KEY_COLUMN_USAGE ke
+        WHERE
+          ke.referenced_table_name IS NOT NULL
+          AND ke.REFERENCED_COLUMN_NAME = 'id'
+        HAVING
+          parentSchema = DATABASE()
+          AND parentTable = '$table'
+        ORDER BY
+          ke.referenced_table_name;";
+        $resp = $connection->select(DB::raw($sql));
+        foreach ($resp as $many) {
+            $functionName = lcfirst(implode('', array_map('ucfirst', explode('_', $many->childTable))));
+            $model = implode('', array_map('ucfirst', explode('_', $many->childTable)));
+            $text .= '
+    /**
+     * This table was referenced in and has many '.$model.'
+     *
+     */
+    public function '.$functionName.'()
+    {
+        return $this->hasMany("'.$name.'\\'.$model.'", "'.$many->ChildColumnName.'");
+    }
+            ';
+        }
+        return $text;
     }
 }
